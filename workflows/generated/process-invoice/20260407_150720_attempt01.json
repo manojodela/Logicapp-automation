@@ -3,44 +3,41 @@
     "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
     "contentVersion": "1.0.0.0",
     "triggers": {
-      "manual": {
-        "type": "Http",
+      "When_HTTP_request_is_received": {
+        "type": "Request",
+        "kind": "Http",
         "inputs": {
-          "method": "POST",
           "schema": {
             "type": "object",
             "properties": {
-              "invoiceId": {
-                "type": "string"
-              },
               "amount": {
                 "type": "number"
               }
             },
             "required": [
-              "invoiceId",
               "amount"
             ]
           }
-        },
-        "recurrence": {
-          "frequency": "Start",
-          "interval": 1
         }
       }
     },
     "actions": {
-      "condition": {
+      "Check_invoice_amount": {
+        "runAfter": {
+          "When_HTTP_request_is_received": [
+            "Succeeded"
+          ]
+        },
         "type": "If",
-        "inputs": {
-          "conditions": [
-            {
-              "expression": "@greaterOrEquals(body('manual')?['amount'], 10000)"
-            }
+        "expression": {
+          "greaterOrEquals": [
+            "@triggerBody()['amount']",
+            10000
           ]
         },
         "actions": {
-          "sendApprovalEmail": {
+          "Send_approval_email": {
+            "runAfter": {},
             "type": "ApiConnection",
             "inputs": {
               "host": {
@@ -50,20 +47,21 @@
               },
               "method": "sendMail",
               "body": {
-                "Body": {
-                  "Content": "Please approve the invoice with amount @{body('manual')?['amount']}",
-                  "ContentType": "HTML"
-                },
-                "Subject": "Invoice Approval Request",
+                "Body": "Invoice amount exceeds 10000",
+                "Subject": "Invoice Approval",
                 "To": "approver@example.com"
               }
-            },
-            "runAfter": {}
+            }
           }
-        },
-        "runAfter": {}
+        }
       },
-      "saveInvoiceToBlob": {
+      "Save_invoice_to_Blob_Storage": {
+        "runAfter": {
+          "Check_invoice_amount": [
+            "Succeeded",
+            "Failed"
+          ]
+        },
         "type": "ApiConnection",
         "inputs": {
           "host": {
@@ -72,24 +70,27 @@
             }
           },
           "method": "createFile",
-          "body": {
-            "Content": "@{body('manual')}",
-            "FileName": "@{body('manual')?['invoiceId']}.json"
+          "body": "@triggerBody()",
+          "parameters": {
+            "folderPath": "/invoices",
+            "fileName": "@guid()"
           }
-        },
+        }
+      },
+      "Return_200_OK_response": {
         "runAfter": {
-          "condition": [
+          "Save_invoice_to_Blob_Storage": [
             "Succeeded"
           ]
+        },
+        "type": "Response",
+        "kind": "Http",
+        "inputs": {
+          "statusCode": 200
         }
       }
     },
-    "outputs": {
-      "httpResponse": {
-        "type": "Http",
-        "statusCode": 200
-      }
-    }
+    "outputs": {}
   },
   "parameters": {
     "$connections": {
