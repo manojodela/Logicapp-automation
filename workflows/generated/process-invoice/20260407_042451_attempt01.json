@@ -1,0 +1,560 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "type": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "function": {
+                "type": "string"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "totalRows": {
+                "type": "integer"
+              },
+              "transformedCount": {
+                "type": "integer"
+              },
+              "cosmosInsert": {
+                "type": "object",
+                "properties": {
+                  "totalRecords": {
+                    "type": "integer"
+                  },
+                  "inserted": {
+                    "type": "integer"
+                  },
+                  "failed": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "failedRecords": {
+                "type": "array"
+              }
+            }
+          }
+        },
+        "runAfter": {}
+      }
+    },
+    "actions": {
+      "Init_Counters": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "JournalBatchNumber",
+              "type": "String",
+              "value": ""
+            },
+            {
+              "name": "FailedRecords",
+              "type": "Array",
+              "value": []
+            },
+            {
+              "name": "SuccessCount",
+              "type": "Integer",
+              "value": 0
+            },
+            {
+              "name": "FailCountFunction",
+              "type": "Integer",
+              "value": 0
+            },
+            {
+              "name": "FailCountD365",
+              "type": "Integer",
+              "value": 0
+            },
+            {
+              "name": "RowKey",
+              "type": "String",
+              "value": ""
+            },
+            {
+              "name": "D365Failed",
+              "type": "Array",
+              "value": []
+            }
+          ]
+        },
+        "runAfter": {
+          "manual": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Loop_FailedRecords": {
+        "type": "ForEach",
+        "inputs": {
+          "forEach": "@triggerBody()?['failedRecords']",
+          "actions": {
+            "Append_FailedRecords": {
+              "type": "AppendToArrayVariable",
+              "inputs": {
+                "name": "FailedRecords",
+                "value": "@item()"
+              },
+              "runAfter": {}
+            }
+          }
+        },
+        "runAfter": {
+          "Init_Counters": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Increment_FailCountFunction": {
+        "type": "IncrementIntegerVariable",
+        "inputs": {
+          "name": "FailCountFunction",
+          "value": "@length(triggerBody()?['failedRecords'])"
+        },
+        "runAfter": {
+          "Loop_FailedRecords": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Query_CosmosDB": {
+        "type": "AzureCosmosDB",
+        "inputs": {
+          "method": "GetDocuments",
+          "databaseId": "@appsetting('cosmos_database_id')",
+          "collectionId": "rms_tc01",
+          "query": "SELECT * FROM c WHERE c.IsExported = 'F'"
+        },
+        "runAfter": {
+          "Increment_FailCountFunction": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Loop_CosmosDB": {
+        "type": "ForEach",
+        "inputs": {
+          "forEach": "@body('Query_CosmosDB')",
+          "actions": {
+            "Patch_CosmosDB": {
+              "type": "AzureCosmosDB",
+              "inputs": {
+                "method": "PatchDocument",
+                "databaseId": "@appsetting('cosmos_database_id')",
+                "collectionId": "rms_tc01",
+                "documentId": "@item().id",
+                "partitionKey": "@item().partitionKey",
+                "body": {
+                  "IsExported": "N"
+                }
+              },
+              "runAfter": {}
+            }
+          }
+        },
+        "runAfter": {
+          "Query_CosmosDB": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Try_Scope": {
+        "type": "Scope",
+        "inputs": {
+          "actions": {
+            "Get_Secret": {
+              "type": "KeyVault",
+              "inputs": {
+                "method": "GetSecret",
+                "vaultName": "@appsetting('key_vault_name')",
+                "secretName": "svt-action-token-body"
+              },
+              "runAfter": {}
+            },
+            "Post_ActionToken": {
+              "type": "Http",
+              "inputs": {
+                "method": "Post",
+                "uri": "@appsetting('action_token_url')",
+                "headers": "@appsetting('action_token_header')",
+                "body": "@body('Get_Secret')"
+              },
+              "runAfter": {
+                "Get_Secret": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Parse_TokenResponse": {
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@body('Post_ActionToken')",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "runAfter": {
+                "Post_ActionToken": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Create_JournalHeader": {
+              "type": "Http",
+              "inputs": {
+                "method": "Post",
+                "uri": "@appsetting('d365_ledger_journal_url')",
+                "headers": {
+                  "Authorization": "@{concat('Bearer ', body('Parse_TokenResponse')?['access_token'])}"
+                },
+                "body": {
+                  "JournalName": "RMSTC",
+                  "Description": "@{concat('TGG_RMS_TC01_', utcNow('yyyy-MM-ddTHH:mm:ssZ'))}",
+                  "IntegrationKey": "",
+                  "dataAreaId": "302"
+                }
+              },
+              "runAfter": {
+                "Parse_TokenResponse": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Parse_JournalHeaderResponse": {
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@body('Create_JournalHeader')",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "JournalBatchNumber": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "runAfter": {
+                "Create_JournalHeader": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Set_JournalBatchNumber": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "JournalBatchNumber",
+                "value": "@body('Parse_JournalHeaderResponse')?['JournalBatchNumber']"
+              },
+              "runAfter": {
+                "Parse_JournalHeaderResponse": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Query_CosmosDB_ForProcessing": {
+              "type": "AzureCosmosDB",
+              "inputs": {
+                "method": "GetDocuments",
+                "databaseId": "@appsetting('cosmos_database_id')",
+                "collectionId": "rms_tc01",
+                "query": "SELECT * FROM c WHERE c.IsExported = 'N'"
+              },
+              "runAfter": {
+                "Set_JournalBatchNumber": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Loop_CosmosDB_ForProcessing": {
+              "type": "ForEach",
+              "inputs": {
+                "forEach": "@body('Query_CosmosDB_ForProcessing')",
+                "actions": {
+                  "Post_JournalLine": {
+                    "type": "Http",
+                    "inputs": {
+                      "method": "Post",
+                      "uri": "@appsetting('D365POSTLINESURL')",
+                      "headers": {
+                        "Authorization": "@{concat('Bearer ', body('Parse_TokenResponse')?['access_token'])}"
+                      },
+                      "body": {
+                        "JournalBatchNumber": "@variables('JournalBatchNumber')",
+                        "AccountType": "@item().AccountType",
+                        "AccountDisplayValue": "@item().AccountDisplayValue",
+                        "Text": "@item().Text",
+                        "OffsetAccountDisplayValue": "@item().OffsetAccountDisplayValue",
+                        "OffsetText": "@item().OffsetText",
+                        "DocumentDate": "@{concat(formatDateTime(item().DocumentDate, 'yyyy-MM-ddTHH:mm:ssZ'))}",
+                        "CreditAmount": "@item().CreditAmount",
+                        "CurrencyCode": "@item().CurrencyCode",
+                        "DebitAmount": "@item().DebitAmount",
+                        "Document": "@item().Document",
+                        "dataAreaId": "302"
+                      }
+                    },
+                    "runAfter": {}
+                  },
+                  "Patch_CosmosDB_ForProcessing": {
+                    "type": "AzureCosmosDB",
+                    "inputs": {
+                      "method": "PatchDocument",
+                      "databaseId": "@appsetting('cosmos_database_id')",
+                      "collectionId": "rms_tc01",
+                      "documentId": "@item().id",
+                      "partitionKey": "@item().partitionKey",
+                      "body": {
+                        "IsExported": "Y",
+                        "JOURNALBATCHNUMBER": "@variables('JournalBatchNumber')"
+                      }
+                    },
+                    "runAfter": {
+                      "Post_JournalLine": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Increment_SuccessCount": {
+                    "type": "IncrementIntegerVariable",
+                    "inputs": {
+                      "name": "SuccessCount",
+                      "value": 1
+                    },
+                    "runAfter": {
+                      "Patch_CosmosDB_ForProcessing": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Catch_Post_JournalLine": {
+                    "type": "Scope",
+                    "inputs": {
+                      "actions": {
+                        "Append_D365Failed": {
+                          "type": "AppendToArrayVariable",
+                          "inputs": {
+                            "name": "D365Failed",
+                            "value": {
+                              "RowKey": "@item().RowKey",
+                              "partitionKey": "@item().partitionKey",
+                              "ErrorTime": "@utcNow('yyyy-MM-ddTHH:mm:ssZ')",
+                              "ErrorMessage": "@body('Post_JournalLine')?['error']?['message']"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Patch_CosmosDB_ForError": {
+                          "type": "AzureCosmosDB",
+                          "inputs": {
+                            "method": "PatchDocument",
+                            "databaseId": "@appsetting('cosmos_database_id')",
+                            "collectionId": "rms_tc01",
+                            "documentId": "@item().id",
+                            "partitionKey": "@item().partitionKey",
+                            "body": {
+                              "IsExported": "F",
+                              "JOURNALBATCHNUMBER": "@variables('JournalBatchNumber')"
+                            }
+                          },
+                          "runAfter": {
+                            "Append_D365Failed": [
+                              "Succeeded"
+                            ]
+                          }
+                        },
+                        "Increment_FailCountD365": {
+                          "type": "IncrementIntegerVariable",
+                          "inputs": {
+                            "name": "FailCountD365",
+                            "value": 1
+                          },
+                          "runAfter": {
+                            "Patch_CosmosDB_ForError": [
+                              "Succeeded"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Post_JournalLine": [
+                        "Failed"
+                      ]
+                    }
+                  }
+                }
+              },
+              "runAfter": {
+                "Query_CosmosDB_ForProcessing": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Delay": {
+              "type": "Delay",
+              "inputs": {
+                "interval": {
+                  "count": 5,
+                  "unit": "Second"
+                }
+              },
+              "runAfter": {
+                "Loop_CosmosDB_ForProcessing": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Post_SubmitToWorkflow": {
+              "type": "Http",
+              "inputs": {
+                "method": "Post",
+                "uri": "@appsetting('submit_to_workflow')",
+                "body": {
+                  "JournalBatchNumber": "@variables('JournalBatchNumber')",
+                  "dataAreaId": "302"
+                }
+              },
+              "runAfter": {
+                "Delay": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Upsert_TableStorage": {
+              "type": "AzureTableStorage",
+              "inputs": {
+                "method": "UpsertEntity",
+                "tableName": "D365FileStatus",
+                "entity": {
+                  "PartitionKey": "RMS_TC01",
+                  "RowKey": "@guid()",
+                  "data_area_Id": "302",
+                  "is_auto_post": true,
+                  "journal_batch_number": "@variables('JournalBatchNumber')",
+                  "status": "@body('Post_SubmitToWorkflow')?['status']",
+                  "success_count": "@variables('SuccessCount')",
+                  "total_count": "@triggerBody()?['totalRows']",
+                  "error": "@concat('Function: ', string(variables('FailCountFunction')), ', D365: ', string(variables('FailCountD365')))"
+                }
+              },
+              "runAfter": {
+                "Post_SubmitToWorkflow": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Update_TableStorage": {
+              "type": "AzureTableStorage",
+              "inputs": {
+                "method": "UpdateEntity",
+                "tableName": "IntegrationHealthSummary",
+                "entity": {
+                  "PartitionKey": "@triggerBody()?['function']",
+                  "RowKey": "@triggerBody()?['summaryRowKey']",
+                  "d365Inserted": "@variables('SuccessCount')",
+                  "d365Failed": "@variables('FailCountD365')",
+                  "journalBatch": "@variables('JournalBatchNumber')",
+                  "status": "Done",
+                  "errorSummary": "@concat('Function: ', string(variables('FailCountFunction')), ', D365: ', string(variables('FailCountD365')))",
+                  "reported": false
+                }
+              },
+              "runAfter": {
+                "Upsert_TableStorage": [
+                  "Succeeded"
+                ]
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Loop_CosmosDB": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Catch_Scope": {
+        "type": "Scope",
+        "inputs": {
+          "actions": {
+            "Send_FailureEmail": {
+              "type": "Office365",
+              "inputs": {
+                "method": "SendEmail",
+                "to": "@appsetting('failure_email_address')",
+                "subject": "Errors in RMSTC01 SVT",
+                "body": "@concat('ENV: ', environment().name, '\nFailure notice: ', utcNow('yyyy-MM-ddTHH:mm:ssZ'), '\nJournalBatchNumber: ', variables('JournalBatchNumber'))"
+              },
+              "runAfter": {}
+            }
+          }
+        },
+        "runAfter": {
+          "Try_Scope": [
+            "Failed",
+            "TimedOut",
+            "Skipped"
+          ]
+        }
+      },
+      "Post_Try_Scope": {
+        "type": "Scope",
+        "inputs": {
+          "actions": {
+            "Check_FailedRecords": {
+              "type": "Condition",
+              "inputs": {
+                "conditions": [
+                  {
+                    "condition": "@not(empty(variables('FailedRecords')))"
+                  },
+                  {
+                    "condition": "@not(empty(variables('D365Failed')))"
+                  }
+                ]
+              },
+              "runAfter": {}
+            },
+            "Send_FailureSummaryEmail": {
+              "type": "Office365",
+              "inputs": {
+                "method": "SendEmail",
+                "to": "@appsetting('failure_email_address')",
+                "subject": "Failure Summary for RMSTC01 SVT",
+                "body": "@concat('RunId: ', triggerBody()?['runId'], '\nTimestamp: ', utcNow('yyyy-MM-ddTHH:mm:ssZ'), '\nJournalBatchNumber: ', variables('JournalBatchNumber'), '\nFunction failure count: ', string(variables('FailCountFunction')), '\nD365 success count: ', string(variables('SuccessCount')), '\nD365 failure count: ', string(variables('FailCountD365')), '\n\nFailed Records:\n<pre>', string(variables('FailedRecords')), '</pre>\n\nD365 Failed Records:\n<pre>', string(variables('D365Failed')), '</pre>')"
+              },
+              "runAfter": {
+                "Check_FailedRecords": [
+                  "Succeeded"
+                ]
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Try_Scope": [
+            "Succeeded",
+            "Failed",
+            "TimedOut",
+            "Skipped"
+          ]
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "parameters": {}
+}

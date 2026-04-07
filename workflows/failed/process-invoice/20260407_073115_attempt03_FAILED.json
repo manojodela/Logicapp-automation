@@ -1,0 +1,144 @@
+{
+  "_metadata": {
+    "workflow_name": "process-invoice",
+    "attempt": 3,
+    "timestamp_utc": "2026-04-07T07:31:15.238021+00:00",
+    "errors": [
+      "ERROR: Bad Request({\"error\":{\"code\":\"NoRegisteredProviderFound\",\"message\":\"No registered resource provider found for location 'australiaeast' and API version '2016-06-01' for type 'sites'. The supported api-versions are '2026-03-01-preview, 2025-05-01, 2025-03-01, 2024-11-01, 2024-04-01, 2023-12-01, 2023-01-01, 2022-09-01, 2022-03-01, 2021-03-01, 2021-02-01, 2021-01-15, 2021-01-01, 2020-12-01, 2020-10-01, 2020-09-01, 2020-06-01, 2019-08-01, 2018-11-01, 2018-02-01, 2016-08-01, 2015-08-01-preview, 2016-03-01, 2015-08-01, 2015-07-01, 2015-06-01, 2015-05-01, 2015-04-01, 2015-02-01, 2014-11-01, 2014-06-01, 2014-04-01, 2014-04-01-preview, 2015-01-01, 2015-11-01, 2016-09-01, 2017-08-01, 2018-12-01-alpha'. The supported locations are 'msftwestus, msfteastus, msfteastasia, msftnortheurope, eastus2stage, centralusstage, southcentralus, southafricanorth, westus, australiaeast, brazilsouth, southeastasia, centralus, japanwest, centralindia, uksouth, canadaeast, koreacentral, francecentral, northeu"
+    ]
+  },
+  "workflow": {
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "triggers": {
+        "manual": {
+          "type": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "invoice": {
+                  "type": "object",
+                  "properties": {
+                    "amount": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "amount"
+                  ]
+                }
+              },
+              "required": [
+                "invoice"
+              ]
+            }
+          },
+          "recurrence": {
+            "frequency": "Start",
+            "interval": 1
+          }
+        }
+      },
+      "actions": {
+        "condition": {
+          "type": "If",
+          "inputs": {
+            "conditions": [
+              {
+                "expression": "@greaterOrEquals(body('manual')?.invoice?.amount, 10000)"
+              }
+            ]
+          },
+          "actions": {
+            "sendApprovalEmail": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['office365']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "body": {
+                  "Body": {
+                    "Content": "Please approve the invoice",
+                    "ContentType": "HTML"
+                  },
+                  "Subject": "Invoice Approval",
+                  "To": "approver@example.com"
+                },
+                "path": "/Mail/Send",
+                "authentication": "@parameters('$authentication')['office365']"
+              },
+              "runAfter": {}
+            }
+          },
+          "runAfter": {
+            "manual": [
+              "Succeeded"
+            ]
+          }
+        },
+        "saveInvoiceToBlob": {
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['azureblob']['connectionId']"
+              }
+            },
+            "method": "post",
+            "body": "@body('manual')",
+            "path": "/datasets/default/files",
+            "authentication": "@parameters('$authentication')['azureblob']",
+            "queries": {
+              "folderPath": "/invoices",
+              "fileName": "invoice.json"
+            }
+          },
+          "runAfter": {
+            "condition": [
+              "Succeeded"
+            ]
+          }
+        }
+      },
+      "outputs": {
+        "httpResponse": {
+          "type": "Http",
+          "statusCode": 200
+        }
+      }
+    },
+    "parameters": {
+      "$connections": {
+        "value": {
+          "office365": {
+            "connectionId": "/subscriptions/your_subscription_id/resourceGroups/your_resource_group/providers/Microsoft.Web/connections/office365",
+            "connectionName": "office365",
+            "id": "/subscriptions/your_subscription_id/providers/Microsoft.Web/locations/centralus/managedApis/office365"
+          },
+          "azureblob": {
+            "connectionId": "/subscriptions/your_subscription_id/resourceGroups/your_resource_group/providers/Microsoft.Web/connections/azureblob",
+            "connectionName": "azureblob",
+            "id": "/subscriptions/your_subscription_id/providers/Microsoft.Web/locations/centralus/managedApis/azureblob"
+          }
+        }
+      },
+      "$authentication": {
+        "value": {
+          "office365": {
+            "type": "ActiveDirectoryOAuth",
+            "authority": "https://login.windows.net",
+            "audience": "https://graph.microsoft.com/"
+          },
+          "azureblob": {
+            "type": "ManagedServiceIdentity"
+          }
+        }
+      }
+    }
+  }
+}

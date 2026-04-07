@@ -1,0 +1,136 @@
+Create a Stateful Azure Logic App (Standard) in JSON workflow definition format 
+that performs the following end-to-end integration pipeline:
+
+---
+
+## TRIGGER
+HTTP Request trigger that accepts a JSON body with these fields:
+- function (string)
+- runId (string)
+- totalRows (integer)
+- transformedCount (integer)
+- cosmosInsert (object): { totalRecords, inserted, failed }
+- failedRecords (array)
+
+---
+
+## VARIABLE INITIALIZATION (Init_Counters)
+Initialize the following variables at the start:
+- JournalBatchNumber (string)
+- FailedRecords (array, empty)
+- SuccessCount (integer, 0)
+- FailCountFunction (integer, 0)
+- FailCountD365 (integer, 0)
+- RowKey (string)
+- D365Failed (array, empty)
+
+---
+
+## PRE-PROCESSING (Before main Try block)
+
+1. Loop over triggerBody()?['failedRecords'] (coalesce to empty array if null)
+   and append each item into FailedRecords array variable.
+
+2. Increment FailCountFunction by the length of triggerBody()?['failedRecords'].
+
+3. Query Azure Cosmos DB container "rms_tc01" for records WHERE IsExported = 'F'.
+
+4. If F-records exist, loop through them and PATCH each record's IsExported 
+   field back to 'N' (reset for retry).
+
+---
+
+## MAIN TRY SCOPE
+
+Run after the F-record reset block (SUCCEEDED, FAILED, or SKIPPED).
+
+Steps inside Try scope:
+
+### Authentication
+1. Get a secret named "svt-action-token-body" from Azure Key Vault 
+   (secure inputs/outputs).
+2. POST to appsetting('action_token_url') with the Key Vault secret as body 
+   and appsetting headers to get an OAuth token.
+3. Parse the token response JSON to extract access_token.
+
+### Journal Header Creation
+4. POST to appsetting('d365_ledger_journal_url') with Bearer token.
+   Body: { JournalName: "RMSTC", Description: "TGG_RMS_TC01_<timestamp in AUS Eastern yyyyMMddHHmm>", IntegrationKey: "", dataAreaId: "302" }
+5. Parse the response and extract JournalBatchNumber.
+6. Set JournalBatchNumber variable.
+
+### Cosmos DB Query & Processing
+7. Query Cosmos DB container "rms_tc01" for records WHERE IsExported = 'N'.
+8. If records exist (count > 0), enter the main processing loop:
+
+   #### For Each Item (concurrency = 1, sequential):
+   a. POST each record as a journal line to appsetting('D365POSTLINESURL') 
+      with Bearer token.
+      Map these fields from Cosmos item: 
+      JournalBatchNumber, AccountType, AccountDisplayValue, Text,
+      OffsetAccountDisplayValue, OffsetText, 
+      DocumentDate (formatted as yyyy-MM-ddTHH:mm:ssZ),
+      CreditAmount, CurrencyCode, DebitAmount, Document, dataAreaId="302".
+      Track cosmosId and partitionKey as tracked properties.
+
+   b. On SUCCESS of POST:
+      - PATCH Cosmos item: set IsExported='Y' and JOURNALBATCHNUMBER=variable.
+      - Increment SuccessCount by 1.
+
+   c. On FAILURE/TIMEOUT of POST:
+      - Append error object { RowKey, partitionKey, ErrorTime, ErrorMessage } 
+        to D365Failed array.
+      - PATCH Cosmos item: set IsExported='F' and JOURNALBATCHNUMBER=variable.
+      - Increment FailCountD365 by 1.
+
+   #### After Loop:
+   d. Wait/Delay 5 seconds.
+   e. POST to appsetting('submit_to_workflow') with JournalBatchNumber 
+      and dataAreaId="302" to trigger D365 workflow submission.
+   f. Upsert a record into Azure Table Storage table "D365FileStatus" with:
+      Integration_name, PartitionKey="RMS_TC01", unique RowKey (guid+timestamp),
+      data_area_Id, is_auto_post, journal_batch_number, status from workflow response,
+      success_count, total_count from trigger, error string combining function 
+      and D365 failures (max 25000 chars each).
+   g. Update a record in Azure Table Storage table "IntegrationHealthSummary" with:
+      PartitionKey=triggerBody()?['function'], RowKey=triggerBody()?['summaryRowKey'],
+      d365Inserted, d365Failed, journalBatch, status="Done", errorSummary, reported="false".
+
+---
+
+## CATCH SCOPE
+Run if Try scope FAILED, TIMEDOUT, or SKIPPED.
+Send an email via Office 365 connection (office365-1) to a configured address with:
+- Subject: "Errors in RMSTC01 SVT"
+- Body: ENV name, failure notice, UTC time, JournalBatchNumber.
+
+---
+
+## POST-TRY: FAILURE EMAIL
+After Try scope completes (any status), check if FailedRecords OR D365Failed 
+arrays have any items.
+If yes, send a detailed HTML failure summary email via Office 365 with:
+- RunId, timestamp, JournalBatchNumber
+- Function failure count, D365 success count, D365 failure count
+- Full list of function failed records and D365 failed records in <pre> blocks.
+
+---
+
+## CONNECTIONS USED
+- AzureCosmosDB (service provider)
+- azureTables (service provider)
+- keyVault (service provider)
+- office365-1 (API connection)
+
+## APP SETTINGS REFERENCED
+- d365_ledger_journal_url
+- D365POSTLINESURL
+- submit_to_workflow
+- action_token_url
+- cosmos_database_id
+- action_token_header (as a parameter)
+
+## OUTPUT
+Return the complete Logic App workflow JSON definition 
+with "kind": "Stateful" and all actions, scopes, conditions, 
+variables, and runAfter dependencies correctly wired.

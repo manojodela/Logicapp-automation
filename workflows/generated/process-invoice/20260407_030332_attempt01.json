@@ -1,0 +1,127 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "type": "Http",
+        "inputs": {
+          "method": "POST",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "number"
+              },
+              "invoiceId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "amount",
+              "invoiceId"
+            ]
+          }
+        },
+        "recurrence": {
+          "frequency": "Start",
+          "interval": 1
+        }
+      }
+    },
+    "actions": {
+      "condition": {
+        "type": "If",
+        "inputs": {
+          "conditions": [
+            {
+              "expression": "@greaterOrEquals(body('manual')?['amount'], 10000)"
+            }
+          ]
+        },
+        "actions": {
+          "sendApprovalEmail": {
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['office365']['connectionId']"
+                }
+              },
+              "method": "POST",
+              "body": {
+                "Body": {
+                  "Content": "Please approve the invoice",
+                  "ContentType": "HTML"
+                },
+                "Subject": "Invoice Approval",
+                "To": "approver@example.com"
+              },
+              "path": "/v2/Mail"
+            },
+            "runAfter": {}
+          }
+        },
+        "runAfter": {
+          "manual": [
+            "Succeeded"
+          ]
+        }
+      },
+      "saveInvoiceToBlob": {
+        "type": "ApiConnection",
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azureblob']['connectionId']"
+            }
+          },
+          "method": "PUT",
+          "body": "@body('manual')",
+          "path": "/datasets/default/files",
+          "queries": {
+            "folderPath": "/invoices",
+            "fileName": "@{body('manual')?['invoiceId']}.json"
+          }
+        },
+        "runAfter": {
+          "condition": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "outputs": {
+      "httpResponse": {
+        "type": "Http",
+        "inputs": {
+          "body": {
+            "message": "Invoice processed successfully"
+          },
+          "statusCode": 200
+        },
+        "runAfter": {
+          "saveInvoiceToBlob": [
+            "Succeeded"
+          ]
+        }
+      }
+    }
+  },
+  "parameters": {
+    "$connections": {
+      "value": {
+        "office365": {
+          "connectionId": "/subscriptions/your-subscription-id/resourceGroups/your-resource-group/providers/Microsoft.Web/connections/office365",
+          "connectionName": "office365",
+          "id": "/subscriptions/your-subscription-id/providers/Microsoft.Web/locations/your-location/managedApis/office365"
+        },
+        "azureblob": {
+          "connectionId": "/subscriptions/your-subscription-id/resourceGroups/your-resource-group/providers/Microsoft.Web/connections/azureblob",
+          "connectionName": "azureblob",
+          "id": "/subscriptions/your-subscription-id/providers/Microsoft.Web/locations/your-location/managedApis/azureblob"
+        }
+      }
+    }
+  }
+}
